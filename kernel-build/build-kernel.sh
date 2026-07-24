@@ -470,8 +470,8 @@ configure_defconfig() {
         info "自定义配置已合并"
     fi
 
-    # Set kernel version
-    scripts/config --file "$OUT_DIR/.config" --set-str CONFIG_LOCALVERSION "-k80pro-optimized" 2>/dev/null || true
+    # Keep the original LOCALVERSION for GKI 2.0 module compatibility.
+    # Changing it breaks vendor_dlkm module vermagic and causes boot hang.
 
     # olddefconfig to resolve any inconsistencies
     make O="$OUT_DIR" ARCH=arm64 olddefconfig 2>&1 | tail -3
