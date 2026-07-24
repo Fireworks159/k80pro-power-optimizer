@@ -446,6 +446,11 @@ jobs:
           # Copy AnyKernel3 template
           cp -r "${{ github.workspace }}/kernel-build/anykernel/"* "$TMP_DIR/" 2>/dev/null || true
 
+          # Recovery 要求 update-binary 必须有可执行权限，否则报
+          # "Failed to extract update-binary" 或刷入失败。
+          chmod +x "$TMP_DIR/META-INF/com/google/android/update-binary" 2>/dev/null || true
+          chmod +x "$TMP_DIR/tools/"* 2>/dev/null || true
+
           # Copy kernel image
           if [ -f "out/arch/arm64/boot/Image" ]; then
             cp "out/arch/arm64/boot/Image" "$TMP_DIR/kernel" 2>/dev/null || true

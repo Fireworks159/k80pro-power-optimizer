@@ -551,6 +551,11 @@ package_kernel() {
     local tmp_dir=$(mktemp -d)
     cp -r "$ANY_KERNEL_DIR"/* "$tmp_dir/" 2>/dev/null || true
 
+    # Recovery 要求 update-binary 必须有可执行权限，否则报
+    # "Failed to extract update-binary" 或刷入失败。
+    chmod +x "$tmp_dir/META-INF/com/google/android/update-binary" 2>/dev/null || true
+    chmod +x "$tmp_dir/tools/"* 2>/dev/null || true
+
     # Copy kernel image
     if [ -f "$OUT_DIR/arch/arm64/boot/Image" ]; then
         cp "$OUT_DIR/arch/arm64/boot/Image" "$tmp_dir/kernel" 2>/dev/null || true
