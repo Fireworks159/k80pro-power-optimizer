@@ -566,17 +566,30 @@ package_kernel() {
         cp "$OUT_DIR/arch/arm64/boot/dtb.img" "$tmp_dir/dtb.img" 2>/dev/null || true
     fi
 
-    # Create zip
-    cd "$tmp_dir"
-    zip -r "$zip_path" . -x "*.git*" 2>/dev/null || {
-        # Fallback to 7z
-        7z a -tzip "$zip_path" . 2>/dev/null || {
+    # Create zip using Python for maximum Recovery compatibility
+    # (system zip command may produce Recovery-incompatible format)
+    local zip_script="$SCRIPT_DIR/create-ak3-zip.py"
+    if [ -f "$zip_script" ]; then
+        python3 "$zip_script" "$tmp_dir" "$zip_path" 2>/dev/null || {
+            cd "$tmp_dir"
+            zip -r "$zip_path" . -x "*.git*" 2>/dev/null || \
+                7z a -tzip "$zip_path" . 2>/dev/null || {
+                warn "ZIP 打包失败"
+                cd "$PROJECT_DIR"
+                rm -rf "$tmp_dir"
+                return
+            }
+        }
+    else
+        cd "$tmp_dir"
+        zip -r "$zip_path" . -x "*.git*" 2>/dev/null || \
+            7z a -tzip "$zip_path" . 2>/dev/null || {
             warn "ZIP 打包失败"
             cd "$PROJECT_DIR"
             rm -rf "$tmp_dir"
             return
         }
-    }
+    fi
     cd "$PROJECT_DIR"
     rm -rf "$tmp_dir"
 

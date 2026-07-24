@@ -461,12 +461,18 @@ jobs:
             cp "out/arch/arm64/boot/dtb.img" "$TMP_DIR/dtb.img" 2>/dev/null || true
           fi
 
-          # Create zip
-          cd "$TMP_DIR"
-          zip -r "$RELEASE_DIR/$ZIP_NAME" . -x "*.git*" 2>/dev/null || \
-            7z a -tzip "$RELEASE_DIR/$ZIP_NAME" . 2>/dev/null || {
-            echo "❌ ZIP 打包失败"
-            exit 1
+          # 使用 Python zipfile 创建 ZIP，确保与 Recovery 兼容
+          # （系统 zip 命令可能产生 Recovery 不兼容的格式）
+          echo "  使用 Python zipfile 创建兼容 ZIP..."
+          python3 "${{ github.workspace }}/kernel-build/create-ak3-zip.py" \
+            "$TMP_DIR" "$RELEASE_DIR/$ZIP_NAME" || {
+            echo "❌ Python ZIP 打包失败，尝试 fallback..."
+            cd "$TMP_DIR"
+            zip -r "$RELEASE_DIR/$ZIP_NAME" . -x "*.git*" 2>/dev/null || \
+              7z a -tzip "$RELEASE_DIR/$ZIP_NAME" . 2>/dev/null || {
+              echo "❌ ZIP 打包失败"
+              exit 1
+            }
           }
 
           rm -rf "$TMP_DIR"
