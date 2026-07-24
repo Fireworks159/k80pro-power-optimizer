@@ -1,7 +1,7 @@
 ### AnyKernel3 Ramdisk Mod Script
 ## Redmi K80 Pro (miro / SM8750)
 ## GKI 2.0: boot=kernel only, init_boot=ramdisk
-## K80 Pro Power Optimized Kernel + SukiSU-Ultra Root
+## K80 Pro Power Optimized Kernel
 
 ### AnyKernel setup
 # global properties
@@ -16,6 +16,8 @@ do.cleanuponabort=1
 device.name1=miro
 device.name2=zircon
 device.name3=
+device.name4=
+device.name5=
 supported.versions=
 supported.patchlevels=
 supported.vendorpatchlevels=
@@ -30,7 +32,6 @@ set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
 
 # boot shell variables
 ## GKI 2.0: only flash boot partition (kernel), init_boot (ramdisk) untouched
-## This preserves Magisk/KernelSU/SukiSU modifications in init_boot
 BLOCK=boot;
 IS_SLOT_DEVICE=1;
 RAMDISK_COMPRESSION=auto;

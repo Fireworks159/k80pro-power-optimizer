@@ -451,10 +451,11 @@ jobs:
           chmod +x "$TMP_DIR/META-INF/com/google/android/update-binary" 2>/dev/null || true
           chmod +x "$TMP_DIR/tools/"* 2>/dev/null || true
 
-          # Copy kernel image (must be named "Image" for flash_boot to find it)
+          # Collect kernel image and dtb paths for the packager
+          KERNEL_IMAGE=""
           if [ -f "out/arch/arm64/boot/Image" ]; then
-            cp "out/arch/arm64/boot/Image" "$TMP_DIR/Image" 2>/dev/null || true
-            echo "✓ 内核镜像已复制: $TMP_DIR/Image"
+            KERNEL_IMAGE="out/arch/arm64/boot/Image"
+            echo "✓ 内核镜像: $KERNEL_IMAGE"
           fi
 
           # Copy dtb
@@ -466,7 +467,7 @@ jobs:
           # （系统 zip 命令可能产生 Recovery 不兼容的格式）
           echo "  使用 Python zipfile 创建兼容 ZIP..."
           python3 "${{ github.workspace }}/kernel-build/create-ak3-zip.py" \
-            "$TMP_DIR" "$RELEASE_DIR/$ZIP_NAME" || {
+            "$TMP_DIR" "$RELEASE_DIR/$ZIP_NAME" "$KERNEL_IMAGE" || {
             echo "❌ Python ZIP 打包失败，尝试 fallback..."
             cd "$TMP_DIR"
             zip -r "$RELEASE_DIR/$ZIP_NAME" . -x "*.git*" 2>/dev/null || \

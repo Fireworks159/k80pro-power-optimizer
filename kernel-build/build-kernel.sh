@@ -556,10 +556,11 @@ package_kernel() {
     chmod +x "$tmp_dir/META-INF/com/google/android/update-binary" 2>/dev/null || true
     chmod +x "$tmp_dir/tools/"* 2>/dev/null || true
 
-    # Copy kernel image (must be named "Image" for flash_boot to find it)
+    # Collect kernel image and dtb paths for the packager
+    local kernel_image=""
     if [ -f "$OUT_DIR/arch/arm64/boot/Image" ]; then
-        cp "$OUT_DIR/arch/arm64/boot/Image" "$tmp_dir/Image" 2>/dev/null || true
-        info "内核镜像已复制: $tmp_dir/Image"
+        kernel_image="$OUT_DIR/arch/arm64/boot/Image"
+        info "内核镜像: $kernel_image"
     fi
 
     # Copy dtb if available
@@ -571,7 +572,7 @@ package_kernel() {
     # (system zip command may produce Recovery-incompatible format)
     local zip_script="$SCRIPT_DIR/create-ak3-zip.py"
     if [ -f "$zip_script" ]; then
-        python3 "$zip_script" "$tmp_dir" "$zip_path" 2>/dev/null || {
+        python3 "$zip_script" "$tmp_dir" "$zip_path" "$kernel_image" 2>/dev/null || {
             cd "$tmp_dir"
             zip -r "$zip_path" . -x "*.git*" 2>/dev/null || \
                 7z a -tzip "$zip_path" . 2>/dev/null || {

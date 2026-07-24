@@ -1,56 +1,92 @@
 #!/usr/bin/env python3
-"""Create a standard-compliant AnyKernel3 ZIP file.
+"""Create a standard AnyKernel3 ZIP package.
 
-Usage: python3 create-ak3-zip.py <source_dir> <output_zip> [kernel_image]
+Usage:
+    python3 create-ak3-zip.py <anykernel_template_dir> <output_zip> [kernel_image]
 
-Unlike the `zip` command, this script uses Python's zipfile module
-to ensure the ZIP is compatible with all Android recoveries (TWRP,
-OrangeFox, etc.) and Magisk/KernelSU apps.
+This script rebuilds the AK3 package from a clean AnyKernel3 template directory
+and an optional kernel image. It ensures the resulting ZIP is compatible with
+Android recoveries (TWRP/OrangeFox) and KernelFlasher/ReKernelFlasher apps.
 """
 import os
 import sys
 import zipfile
 import stat
 
+
+def add_file(zf: zipfile.ZipFile, src_path: str, arcname: str, mode: int):
+    """Add a single file to the ZIP with explicit Unix permissions."""
+    info = zipfile.ZipInfo(arcname)
+    # Unix permissions go in the upper 16 bits of external_attr.
+    info.external_attr = (mode & 0o7777) << 16
+    info.compress_type = zipfile.ZIP_DEFLATED
+    with open(src_path, 'rb') as f:
+        zf.writestr(info, f.read())
+
+
+def add_directory(zf: zipfile.ZipFile, arcname: str, mode: int = 0o755):
+    """Add an explicit directory entry (helps some recovery ZIP parsers)."""
+    if not arcname.endswith('/'):
+        arcname += '/'
+    info = zipfile.ZipInfo(arcname)
+    info.external_attr = ((mode & 0o7777) << 16) | stat.S_IFDIR
+    info.compress_type = zipfile.ZIP_STORED
+    zf.writestr(info, b'')
+
+
 def create_zip(src_dir: str, output_zip: str, kernel_image: str | None = None):
-    """Create a ZIP preserving Unix permissions."""
-    with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_DEFLATED, allowZip64=False) as zf:
-        # Walk the source directory
+    src_dir = os.path.abspath(src_dir)
+    output_zip = os.path.abspath(output_zip)
+
+    with zipfile.ZipFile(
+        output_zip, 'w', compression=zipfile.ZIP_DEFLATED, allowZip64=False
+    ) as zf:
+        # Walk the template directory and add every real file.
         for root, dirs, files in os.walk(src_dir):
-            # Skip git files
-            dirs[:] = [d for d in dirs if '.git' not in d]
+            # Skip git metadata and macOS resource forks if present.
+            dirs[:] = [
+                d for d in dirs
+                if not d.startswith('.git') and d != '__MACOSX'
+            ]
+
+            # Ensure directory entries exist for important paths.
+            relpath = os.path.relpath(root, src_dir)
+            if relpath != '.':
+                add_directory(zf, relpath.replace(os.sep, '/'))
 
             for name in sorted(files):
-                if '.git' in name:
+                if name.startswith('.git') or name == '.DS_Store':
                     continue
                 filepath = os.path.join(root, name)
-                arcname = os.path.relpath(filepath, src_dir)
+                if not os.path.isfile(filepath):
+                    continue
+                arcname = os.path.relpath(filepath, src_dir).replace(os.sep, '/')
 
-                # Get file info and preserve permissions
-                info = zipfile.ZipInfo(arcname)
                 st = os.stat(filepath)
-                # Set Unix permissions in external_attr
-                info.external_attr = (st.st_mode & 0oFFFF) << 16
+                mode = st.st_mode & 0o777
 
-                # Force executable bits for tools and update-binary
-                if arcname.startswith('tools/') or arcname == 'META-INF/com/google/android/update-binary':
-                    info.external_attr = (0o755 & 0oFFFF) << 16
+                # Force executable bits for the update-binary and any tool.
+                if arcname == 'META-INF/com/google/android/update-binary':
+                    mode = 0o755
+                elif arcname.startswith('tools/'):
+                    mode = 0o755
+                elif mode == 0:
+                    mode = 0o644
 
-                # Read and write file data
-                with open(filepath, 'rb') as src:
-                    zf.writestr(info, src.read())
+                add_file(zf, filepath, arcname, mode)
 
-        # Add kernel image if provided
+        # Add the kernel image if provided.
         if kernel_image and os.path.isfile(kernel_image):
-            info = zipfile.ZipInfo('Image')
-            info.external_attr = (0o644 & 0oFFFF) << 16
-            with open(kernel_image, 'rb') as src:
-                zf.writestr(info, src.read())
+            add_file(zf, kernel_image, 'Image', 0o644)
 
     print(f"Created: {output_zip} ({os.path.getsize(output_zip)} bytes)")
 
+
 if __name__ == '__main__':
-    src_dir = sys.argv[1]
-    output_zip = sys.argv[2]
+    if len(sys.argv) < 3:
+        print(__doc__, file=sys.stderr)
+        sys.exit(1)
+    src = sys.argv[1]
+    out = sys.argv[2]
     kernel = sys.argv[3] if len(sys.argv) > 3 else None
-    create_zip(src_dir, output_zip, kernel)
+    create_zip(src, out, kernel)
