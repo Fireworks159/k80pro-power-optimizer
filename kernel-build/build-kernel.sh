@@ -216,6 +216,15 @@ fix_micode_kconfig() {
     else
         info "所有 Kconfig 引用已存在"
     fi
+
+    # Cirrus DSP 驱动在 OSS / NeutronClang 下编译失败，
+    # 但其 Kconfig 默认设为 m，olddefconfig 会反复打开。
+    # 把 FW_CS_DSP 的默认值改为 n。
+    if [ -f "drivers/firmware/cirrus/Kconfig" ]; then
+        sed -i '/^config FW_CS_DSP$/,/^config /{s/default m/default n/}' drivers/firmware/cirrus/Kconfig 2>/dev/null || true
+        info "已修改 Cirrus DSP Kconfig 默认值"
+    fi
+
     cd "$PROJECT_DIR"
 }
 

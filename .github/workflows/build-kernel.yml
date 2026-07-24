@@ -170,6 +170,19 @@ jobs:
           done
           echo "修复了 $MISSING_KCF 个缺失的 Kconfig 引用"
 
+      # ---- 修复 MiCode OSS 有问题的 Kconfig 默认值 ----
+      - name: 修复 MiCode OSS 有问题的 Kconfig 默认值
+        run: |
+          cd kernel-source
+          # Cirrus DSP 驱动在 OSS / NeutronClang 下编译失败，
+          # 但其 Kconfig 默认设为 m，olddefconfig 会反复打开。
+          # 把 FW_CS_DSP 的默认值改为 n，让后续 olddefconfig 不会启用它。
+          if [ -f "drivers/firmware/cirrus/Kconfig" ]; then
+            sed -i '/^config FW_CS_DSP$/,/^config /{s/default m/default n/}' drivers/firmware/cirrus/Kconfig 2>/dev/null || true
+            echo "✓ 已修改 Cirrus DSP Kconfig 默认值"
+            cat drivers/firmware/cirrus/Kconfig
+          fi
+
       # ---- SukiSU-Ultra ----
       - name: 集成 SukiSU-Ultra
         if: ${{ !inputs.skip_sukisu }}
