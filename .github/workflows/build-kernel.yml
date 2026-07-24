@@ -388,7 +388,7 @@ jobs:
           # 强制禁用 MiCode OSS 中有问题的驱动：
           # 这些驱动依赖小米私有 vendor hooks，在 OSS / NeutronClang 下编译失败。
           # 在 olddefconfig 之后直接改 .config，避免 Kconfig default 又把它们打开。
-          for bad_cfg in CONFIG_PERF_HELPER CONFIG_FW_CS_DSP CONFIG_CL_DSP; do
+          for bad_cfg in CONFIG_PERF_HELPER CONFIG_FW_CS_DSP CONFIG_CL_DSP CONFIG_MTD_OOPS; do
             if grep -qE "^${bad_cfg}=(y|m)" out/.config; then
               sed -i -E "s/^${bad_cfg}=(y|m)/# ${bad_cfg} is not set/" out/.config
               echo "  已禁用 ${bad_cfg}"
@@ -397,6 +397,10 @@ jobs:
 
           echo "=== defconfig 配置完成 ==="
           echo "CONFIG_KSU=$(scripts/config --file out/.config --state CONFIG_KSU 2>/dev/null || echo 'unknown')"
+          echo "关键依赖检查:"
+          for cfg in CONFIG_MTD_OOPS CONFIG_INPUT_PM8941_PWRKEY CONFIG_MFD_SPMI_PMIC CONFIG_SPMI; do
+            echo "  ${cfg}=$(scripts/config --file out/.config --state ${cfg} 2>/dev/null || echo 'unknown')"
+          done
 
       # ---- 编译 ----
       - name: 清理旧编译

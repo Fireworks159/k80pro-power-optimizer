@@ -477,7 +477,7 @@ configure_defconfig() {
     make O="$OUT_DIR" ARCH=arm64 olddefconfig 2>&1 | tail -3
 
     # 强制禁用 MiCode OSS 中有问题的驱动
-    for bad_cfg in CONFIG_PERF_HELPER CONFIG_FW_CS_DSP CONFIG_CL_DSP; do
+    for bad_cfg in CONFIG_PERF_HELPER CONFIG_FW_CS_DSP CONFIG_CL_DSP CONFIG_MTD_OOPS; do
         if grep -qE "^${bad_cfg}=(y|m)" "$OUT_DIR/.config"; then
             sed -i -E "s/^${bad_cfg}=(y|m)/# ${bad_cfg} is not set/" "$OUT_DIR/.config"
             echo "  已禁用 ${bad_cfg}"
