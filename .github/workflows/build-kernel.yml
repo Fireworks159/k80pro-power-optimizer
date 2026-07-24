@@ -372,6 +372,16 @@ jobs:
           scripts/config --file out/.config --set-str CONFIG_LOCALVERSION "-k80pro-optimized" 2>/dev/null || true
           make O=out ARCH=arm64 olddefconfig 2>&1 | tail -3
 
+          # 强制禁用 MiCode OSS 中有问题的驱动：
+          # 这些驱动依赖小米私有 vendor hooks，在 OSS / NeutronClang 下编译失败。
+          # 在 olddefconfig 之后直接改 .config，避免 Kconfig default 又把它们打开。
+          for bad_cfg in CONFIG_PERF_HELPER CONFIG_FW_CS_DSP CONFIG_CL_DSP; do
+            if grep -qE "^${bad_cfg}=(y|m)" out/.config; then
+              sed -i -E "s/^${bad_cfg}=(y|m)/# ${bad_cfg} is not set/" out/.config
+              echo "  已禁用 ${bad_cfg}"
+            fi
+          done
+
           echo "=== defconfig 配置完成 ==="
           echo "CONFIG_KSU=$(scripts/config --file out/.config --state CONFIG_KSU 2>/dev/null || echo 'unknown')"
 

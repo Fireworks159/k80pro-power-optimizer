@@ -467,6 +467,14 @@ configure_defconfig() {
     # olddefconfig to resolve any inconsistencies
     make O="$OUT_DIR" ARCH=arm64 olddefconfig 2>&1 | tail -3
 
+    # 强制禁用 MiCode OSS 中有问题的驱动
+    for bad_cfg in CONFIG_PERF_HELPER CONFIG_FW_CS_DSP CONFIG_CL_DSP; do
+        if grep -qE "^${bad_cfg}=(y|m)" "$OUT_DIR/.config"; then
+            sed -i -E "s/^${bad_cfg}=(y|m)/# ${bad_cfg} is not set/" "$OUT_DIR/.config"
+            echo "  已禁用 ${bad_cfg}"
+        fi
+    done
+
     if [ "${SUKISU_INTEGRATED:-0}" = "1" ]; then
         info "SukiSU 集成状态: 已启用 (CONFIG_KSU=y)"
     else
