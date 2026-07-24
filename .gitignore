@@ -1,0 +1,20 @@
+# Kernel build artifacts
+kernel-source/
+out/
+release/
+*.log
+*.zip
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Toolchain
+~/toolchains/

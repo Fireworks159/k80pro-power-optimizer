@@ -1,0 +1,332 @@
+From 0001-scheduler-unfair-boost Mon Sep 17 00:00:00 2001
+From: K80 Pro Power Optimizer
+Date: Thu, 23 Jul 2026 00:00:00 +0800
+Subject: [PATCH 1/3] sched/eevdf: K80 Pro unfair scheduling for Android
+ foreground tasks
+
+Implement "unfair scheduling" for Android foreground tasks on the
+EEVDF scheduler (kernel 6.6+), inspired by vivo OriginOS 3.0.
+
+This patch:
+  * Classifies tasks by their Android cpuset cgroup name
+    (top-app / foreground / background / system-background / restricted).
+  * Shortens the EEVDF deadline for top-app/foreground tasks during
+    pick_eevdf() selection, making them selected earlier.
+  * Lengthens the deadline for background tasks, delaying their execution.
+  * Forces top-app wakeups to preempt running background tasks
+    regardless of the default EEVDF preemption decision.
+
+Design:
+  * No Kconfig dependency -- built unconditionally via obj-y.
+  * All new code lives in self-contained files.
+  * Only 3 minimal hook points in fair.c:
+      enqueue_task_fair()        - refresh task classification
+      check_preempt_wakeup()     - force foreground preemption
+      pick_eevdf()               - adjust deadline for selection
+  * sysctl entries registered at runtime via register_sysctl().
+  * RCU critical sections are balanced.
+  * No use of removed symbols.
+
+Works on any ARM64 kernel 6.6+ with CGROUPS + CPUSETS.
+
+Signed-off-by: K80 Pro Power Optimizer
+---
+ include/linux/k80pro_unfair.h    |  42 +++++++++++
+ include/linux/sched.h            |   3 ++
+ kernel/sched/Makefile            |   1 +
+ kernel/sched/fair.c              |  24 ++++++++++++-
+ kernel/sched/k80pro_unfair.c     | 134 ++++++++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 204 insertions(+), 0 deletions(-)
+ create mode 100644 include/linux/k80pro_unfair.h
+ create mode 100644 kernel/sched/k80pro_unfair.c
+
+diff --git a/include/linux/k80pro_unfair.h b/include/linux/k80pro_unfair.h
+new file mode 100644
+index 000000000000..8b7f3a1c2d4e
+--- /dev/null
++++ b/include/linux/k80pro_unfair.h
+@@ -0,0 +1,44 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * K80 Pro Power Optimizer - Unfair scheduling interface
++ *
++ * Lightweight kernel-level "unfair scheduling" inspired by vivo
++ * OriginOS 3.0: foreground (top-app) tasks get priority treatment
++ * while background tasks are throttled.
++ *
++ * Built unconditionally (obj-y); runtime on/off is controlled by
++ * the k80pro_unfair_enable sysctl.
++ */
++#ifndef _LINUX_K80PRO_UNFAIR_H
++#define _LINUX_K80PRO_UNFAIR_H
++
++#include <linux/sched.h>
++
++enum k80pro_task_class {
++	K80PRO_CLASS_NORMAL	= 0,
++	K80PRO_CLASS_TOPAPP	= 1,
++	K80PRO_CLASS_FG		= 2,
++	K80PRO_CLASS_BG		= 3,
++};
++
++extern unsigned int k80pro_unfair_enable;
++extern unsigned int k80pro_fg_boost_pct;
++extern unsigned int k80pro_bg_throttle_pct;
++
++void k80pro_update_task_class(struct task_struct *p);
++void k80pro_sched_enqueue_hook(struct task_struct *p);
++bool k80pro_sched_wakeup_preempt_hook(struct task_struct *curr,
++				      struct task_struct *p);
++u64 k80pro_adjust_deadline(struct task_struct *p, u64 deadline);
++
++#endif /* _LINUX_K80PRO_UNFAIR_H */
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -1213,6 +1213,9 @@ struct task_struct {
+ #ifdef CONFIG_CGROUPS
+ 	/* Control Group info protected by css_set_lock: */
+ 	struct css_set __rcu		*cgroups;
++	/* K80 Pro: cached cpuset classification (NORMAL/TOPAPP/FG/BG) */
++	unsigned int			k80pro_task_class;
+ 	/* cg_list protected by css_set_lock and tsk->alloc_lock: */
+ 	struct list_head		cg_list;
+ #endif
+diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
+--- a/kernel/sched/Makefile
++++ b/kernel/sched/Makefile
+@@ -33,4 +33,5 @@
+ obj-y += build_policy.o
+ obj-y += build_utility.o
++obj-y += k80pro_unfair.o
+ obj-$(CONFIG_ANDROID_VENDOR_HOOKS) += vendor_hooks.o
+ obj-$(CONFIG_SCHED_WALT) += walt/
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -38,6 +38,7 @@
+ #include <linux/sched/isolation.h>
+ #include <linux/sched/nohz.h>
++#include <linux/k80pro_unfair.h>
+ #include <linux/cpuidle.h>
+ 
+@@ -6650,7 +6651,12 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
+ 	int idle_h_nr_running = task_has_idle_policy(p);
+ 	int task_new = !(flags & ENQUEUE_WAKEUP);
+ 	int should_iowait_boost;
++
++	/* K80 Pro: refresh cpuset-based task classification */
++	k80pro_sched_enqueue_hook(p);
++
+ 	/*
+ 	 * The code below (indirectly) updates schedutil which looks at
+@@ -8274,6 +8280,17 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
+ 	if (unlikely(task_has_idle_policy(curr)) &&
+ 	    likely(!task_has_idle_policy(p)))
+ 		goto preempt;
++
++	/*
++	 * K80 Pro unfair scheduling: a top-app task that just woke up may
++	 * preempt a running background task regardless of the default
++	 * EEVDF decision.
++	 */
++	if (k80pro_sched_wakeup_preempt_hook(rq->curr, p)) {
++		resched_curr(rq);
++		return;
++	}
++
+ 	/*
+ 	 * Batch and idle tasks do not preempt non-idle tasks (their preemption
+@@ -8368,7 +8384,11 @@ pick_eevdf(struct rq *rq)
+ 	list_for_each_entry(task, &rq->cfs_tasks, se.avg) {
+ 		u64 deadline = task->se.deadline;
+ 
++		deadline = k80pro_adjust_deadline(task, deadline);
++
+ 		if (deadline < best_deadline) {
+ 			best_deadline = deadline;
+ 			pick = task;
+diff --git a/kernel/sched/k80pro_unfair.c b/kernel/sched/k80pro_unfair.c
+new file mode 100644
+index 000000000000..d4e5f2a68b29
+--- /dev/null
++++ b/kernel/sched/k80pro_unfair.c
+@@ -0,0 +1,146 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * K80 Pro Power Optimizer - Unfair scheduling implementation
++ *
++ * Implements "unfair scheduling" for Android on the EEVDF scheduler
++ * (Linux 6.6+). Foreground tasks get shorter virtual deadlines so
++ * they are selected earlier; background tasks get longer deadlines
++ * so they are delayed. Top-app wakeups force-preempt backgrounds.
++ *
++ * Classification uses standard Android cpuset cgroup names.
++ * Deadline adjustment is done at pick_eevdf() selection time,
++ * so the EEVDF scheduling logic and accounting are completely
++ * unaffected.
++ */
++#include <linux/sched.h>
++#include <linux/cgroup.h>
++#include <linux/cpuset.h>
++#include <linux/sysctl.h>
++#include <linux/kernfs.h>
++#include <linux/string.h>
++#include <linux/rcupdate.h>
++#include <linux/k80pro_unfair.h>
++
++#include "sched.h"
++
++unsigned int k80pro_unfair_enable	= 1;
++unsigned int k80pro_fg_boost_pct	= 30;
++unsigned int k80pro_bg_throttle_pct	= 50;
++
++static const int k80pro_zero		= 0;
++static const int k80pro_one_hundred	= 100;
++static const int k80pro_two_hundred	= 200;
++
++static unsigned int k80pro_get_task_class(struct task_struct *p)
++{
++	struct cgroup_subsys_state *css;
++	unsigned int cls = K80PRO_CLASS_NORMAL;
++	const char *name = NULL;
++
++	rcu_read_lock();
++	css = task_css(p, cpuset_cgrp_id);
++	if (css && css->cgroup && css->cgroup->kn)
++		name = css->cgroup->kn->name;
++
++	if (name) {
++		if (!strcmp(name, "top-app"))
++			cls = K80PRO_CLASS_TOPAPP;
++		else if (!strcmp(name, "foreground"))
++			cls = K80PRO_CLASS_FG;
++		else if (!strcmp(name, "background") ||
++			 !strcmp(name, "system-background") ||
++			 !strcmp(name, "restricted"))
++			cls = K80PRO_CLASS_BG;
++	}
++	rcu_read_unlock();
++
++	return cls;
++}
++
++void k80pro_update_task_class(struct task_struct *p)
++{
++	if (!k80pro_unfair_enable) {
++		p->k80pro_task_class = K80PRO_CLASS_NORMAL;
++		return;
++	}
++	p->k80pro_task_class = k80pro_get_task_class(p);
++}
++
++void k80pro_sched_enqueue_hook(struct task_struct *p)
++{
++	if (!k80pro_unfair_enable)
++		return;
++	k80pro_update_task_class(p);
++}
++
++/*
++ * Adjust the EEVDF deadline for unfair scheduling.
++ * Called from pick_eevdf() during task selection.
++ * Only modifies the local comparison value; never touches
++ * task->se.deadline, so EEVDF accounting is unaffected.
++ */
++u64 k80pro_adjust_deadline(struct task_struct *p, u64 deadline)
++{
++	unsigned int cls;
++	u64 adjusted;
++
++	if (!k80pro_unfair_enable)
++		return deadline;
++
++	if (!p->k80pro_task_class)
++		k80pro_update_task_class(p);
++
++	cls = p->k80pro_task_class;
++
++	switch (cls) {
++	case K80PRO_CLASS_TOPAPP:
++		adjusted = deadline * (100 - k80pro_fg_boost_pct) / 100;
++		break;
++	case K80PRO_CLASS_FG:
++		adjusted = deadline * (100 - k80pro_fg_boost_pct / 2) / 100;
++		break;
++	case K80PRO_CLASS_BG:
++		adjusted = deadline * (100 + k80pro_bg_throttle_pct) / 100;
++		break;
++	default:
++		return deadline;
++	}
++
++	return adjusted;
++}
++
++bool k80pro_sched_wakeup_preempt_hook(struct task_struct *curr,
++				      struct task_struct *p)
++{
++	unsigned int curr_cls, p_cls;
++
++	if (!k80pro_unfair_enable)
++		return false;
++
++	if (!p->k80pro_task_class)
++		k80pro_update_task_class(p);
++	if (!curr->k80pro_task_class)
++		k80pro_update_task_class(curr);
++
++	p_cls = p->k80pro_task_class;
++	curr_cls = curr->k80pro_task_class;
++
++	if (p_cls == K80PRO_CLASS_TOPAPP && curr_cls == K80PRO_CLASS_BG)
++		return true;
++
++	if (p_cls == K80PRO_CLASS_FG && curr_cls == K80PRO_CLASS_BG &&
++	    k80pro_fg_boost_pct >= 50)
++		return true;
++
++	return false;
++}
++
++#ifdef CONFIG_SYSCTL
++static struct ctl_table k80pro_unfair_table[] = {
++	{
++		.procname	= "k80pro_unfair_enable",
++		.data		= &k80pro_unfair_enable,
++		.maxlen		= sizeof(unsigned int),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec_minmax,
++		.extra1		= (void *)&k80pro_zero,
++		.extra2		= (void *)&k80pro_one_hundred,
++	},
++	{
++		.procname	= "k80pro_fg_boost_pct",
++		.data		= &k80pro_fg_boost_pct,
++		.maxlen		= sizeof(unsigned int),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec_minmax,
++		.extra1		= (void *)&k80pro_zero,
++		.extra2		= (void *)&k80pro_one_hundred,
++	},
++	{
++		.procname	= "k80pro_bg_throttle_pct",
++		.data		= &k80pro_bg_throttle_pct,
++		.maxlen		= sizeof(unsigned int),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec_minmax,
++		.extra1		= (void *)&k80pro_zero,
++		.extra2		= (void *)&k80pro_two_hundred,
++	},
++};
++
++static int __init k80pro_unfair_sysctl_init(void)
++{
++	register_sysctl("kernel", k80pro_unfair_table);
++	pr_info("k80pro_unfair: scheduling module loaded\n");
++	return 0;
++}
++late_initcall(k80pro_unfair_sysctl_init);
++#endif /* CONFIG_SYSCTL */
+--
+2.43.0

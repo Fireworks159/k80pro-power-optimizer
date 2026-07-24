@@ -1,0 +1,181 @@
+From 0003-power-management Mon Sep 17 00:00:00 2001
+From: K80 Pro Power Optimizer
+Date: Thu, 23 Jul 2026 00:00:00 +0800
+Subject: [PATCH 3/3] power: K80 Pro PM statistics and tunables
+
+Registers a PM notifier that counts suspend/resume cycles and
+accumulates total suspend time. Exposes read-only sysctls under
+/proc/sys/kernel/ for runtime monitoring.
+
+No wakelock.c, idle.c, or cpuidle internals are modified, so this
+patch is safe to apply on any 6.6+ kernel.
+
+Exposed sysctls:
+  k80pro_pm_enable          - master switch (0/1)
+  k80pro_pm_suspend_count  - total suspend cycles (read-only)
+  k80pro_pm_total_suspend_ms - cumulative suspend time (read-only)
+  k80pro_pm_last_resume_ms  - last suspend duration (read-only)
+
+Built unconditionally via obj-y; runtime on/off is k80pro_pm_enable.
+
+Signed-off-by: K80 Pro Power Optimizer
+---
+ include/linux/k80pro_pm.h |  14 +++++++
+ kernel/power/Makefile     |   1 +
+ kernel/power/k80pro_pm.c  | 122 +++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 137 insertions(+)
+ create mode 100644 include/linux/k80pro_pm.h
+ create mode 100644 kernel/power/k80pro_pm.c
+
+diff --git a/include/linux/k80pro_pm.h b/include/linux/k80pro_pm.h
+new file mode 100644
+index 000000000000..c4b5d6e7f8a9
+--- /dev/null
++++ b/include/linux/k80pro_pm.h
+@@ -0,0 +1,16 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * K80 Pro Power Optimizer - Power-management telemetry interface.
++ *
++ * Self-contained module: counts suspend/resume cycles and exposes
++ * the counters via sysctl. No wakelock or cpuidle internals touched.
++ */
++#ifndef _LINUX_K80PRO_PM_H
++#define _LINUX_K80PRO_PM_H
++
++extern unsigned int k80pro_pm_enable;
++
++#endif /* _LINUX_K80PRO_PM_H */
+diff --git a/kernel/power/Makefile b/kernel/power/Makefile
+--- a/kernel/power/Makefile
++++ b/kernel/power/Makefile
+@@ -19,4 +19,5 @@
+ obj-$(CONFIG_PM_AUTOSLEEP)	+= autosleep.o
+ obj-$(CONFIG_PM_WAKELOCKS)	+= wakelock.o
++obj-y				+= k80pro_pm.o
+ obj-$(CONFIG_MAGIC_SYSRQ)	+= poweroff.o
+diff --git a/kernel/power/k80pro_pm.c b/kernel/power/k80pro_pm.c
+new file mode 100644
+index 000000000000..d5e6f7a8b9c0
+--- /dev/null
++++ b/kernel/power/k80pro_pm.c
+@@ -0,0 +1,122 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * K80 Pro Power Optimizer - PM telemetry
++ *
++ * Self-contained module that:
++ *   1. Counts suspend/resume cycles via a PM notifier.
++ *   2. Accumulates total suspend time.
++ *   3. Exposes the counters through /proc/sys/kernel/.
++ *
++ * No wakelock.c, idle.c, or cpuidle internals are modified.
++ */
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/ktime.h>
++#include <linux/sysctl.h>
++#include <linux/suspend.h>
++#include <linux/notifier.h>
++#include <linux/spinlock.h>
++#include <linux/k80pro_pm.h>
++
++unsigned int k80pro_pm_enable = 1;
++
++static const int k80pro_zero = 0;
++static const int k80pro_one  = 1;
++
++static unsigned int  k80pro_pm_suspend_count;
++static unsigned long k80pro_pm_total_suspend_ms;
++static unsigned long k80pro_pm_last_resume_ms;
++static ktime_t       k80pro_pm_suspend_start;
++static DEFINE_SPINLOCK(k80pro_pm_lock);
++
++static int k80pro_pm_notifier_call(struct notifier_block *nb,
++				   unsigned long event, void *dummy)
++{
++	unsigned long flags;
++	ktime_t now;
++	unsigned long dur_ms;
++
++	if (!k80pro_pm_enable)
++		return NOTIFY_OK;
++
++	switch (event) {
++	case PM_SUSPEND_PREPARE:
++		spin_lock_irqsave(&k80pro_pm_lock, flags);
++		k80pro_pm_suspend_start = ktime_get();
++		spin_unlock_irqrestore(&k80pro_pm_lock, flags);
++		break;
++
++	case PM_POST_SUSPEND:
++		now = ktime_get();
++		spin_lock_irqsave(&k80pro_pm_lock, flags);
++		dur_ms = (unsigned long)ktime_to_ms(ktime_sub(now,
++							k80pro_pm_suspend_start));
++		k80pro_pm_suspend_count++;
++		k80pro_pm_total_suspend_ms += dur_ms;
++		k80pro_pm_last_resume_ms = dur_ms;
++		spin_unlock_irqrestore(&k80pro_pm_lock, flags);
++		pr_info("k80pro_pm: resume after %lu ms (total %u suspends)\n",
++			dur_ms, k80pro_pm_suspend_count);
++		break;
++	}
++
++	return NOTIFY_OK;
++}
++
++static struct notifier_block k80pro_pm_notifier_block = {
++	.notifier_call	= k80pro_pm_notifier_call,
++	.priority	= 0,
++};
++
++#ifdef CONFIG_SYSCTL
++static struct ctl_table k80pro_pm_table[] = {
++	{
++		.procname	= "k80pro_pm_enable",
++		.data		= &k80pro_pm_enable,
++		.maxlen		= sizeof(unsigned int),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec_minmax,
++		.extra1		= (void *)&k80pro_zero,
++		.extra2		= (void *)&k80pro_one,
++	},
++	{
++		.procname	= "k80pro_pm_suspend_count",
++		.data		= &k80pro_pm_suspend_count,
++		.maxlen		= sizeof(unsigned int),
++		.mode		= 0444,
++		.proc_handler	= proc_dointvec,
++	},
++	{
++		.procname	= "k80pro_pm_total_suspend_ms",
++		.data		= &k80pro_pm_total_suspend_ms,
++		.maxlen		= sizeof(unsigned long),
++		.mode		= 0444,
++		.proc_handler	= proc_doulongvec_minmax,
++	},
++	{
++		.procname	= "k80pro_pm_last_resume_ms",
++		.data		= &k80pro_pm_last_resume_ms,
++		.maxlen		= sizeof(unsigned long),
++		.mode		= 0444,
++		.proc_handler	= proc_doulongvec_minmax,
++	},
++};
++
++static int __init k80pro_pm_sysctl_init(void)
++{
++	register_sysctl("kernel", k80pro_pm_table);
++	return 0;
++}
++late_initcall(k80pro_pm_sysctl_init);
++#endif /* CONFIG_SYSCTL */
++
++static int __init k80pro_pm_init(void)
++{
++	return register_pm_notifier(&k80pro_pm_notifier_block);
++}
++late_initcall(k80pro_pm_init);
+--
+2.43.0

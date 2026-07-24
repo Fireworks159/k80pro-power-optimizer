@@ -1,0 +1,18 @@
+#!/sbin/sh
+# AnyKernel3 update-binary
+# This script is called by the recovery with arguments:
+#   $1 = path to the zip file
+#   $2 = path to the recovery's temporary directory
+#   $3 = path to the stock boot image backup
+
+OUTFD=$2
+ZIP=$1
+FD3=$3
+
+mkdir -p /tmp/anykernel
+cp -r $ZIP/META-INF $ZIP/anykernel $ZIP/tools /tmp/anykernel/ 2>/dev/null
+cp -r $ZIP/kernel $ZIP/dtb.img /tmp/anykernel/ 2>/dev/null
+
+/tmp/anykernel/META-INF/com/google/android/updater-script $1 $2 $3
+
+exit $?

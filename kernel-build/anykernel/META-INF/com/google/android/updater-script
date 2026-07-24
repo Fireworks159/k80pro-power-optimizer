@@ -1,0 +1,5 @@
+#!/sbin/sh
+# AnyKernel3 updater-script for K80 Pro Power Kernel
+# This is called by the recovery to start the installation.
+
+. /tmp/anykernel/anykernel.sh

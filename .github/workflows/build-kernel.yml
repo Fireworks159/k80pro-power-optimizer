@@ -1,0 +1,484 @@
+# ================================================================
+# K80 Pro 自定义内核 CI 云端编译
+# 纯内核方案: SukiSU-Ultra Root + 不公平调度省电优化
+# ================================================================
+#
+# 使用方法:
+#   1. 推送代码到 GitHub
+#   2. 在 Actions 页面手动触发 "Build Kernel" workflow
+#   3. 等待编译完成 (约 30-45 分钟)
+#   4. 在 Artifacts 区域下载 K80Pro-Power-Kernel ZIP
+# ================================================================
+name: Build K80 Pro Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      sukisu_branch:
+        description: 'SukiSU-Ultra 分支'
+        required: true
+        default: 'main'
+        type: string
+      skip_sukisu:
+        description: '跳过 SukiSU-Ultra 集成'
+        required: false
+        default: false
+        type: boolean
+      skip_patches:
+        description: '跳过省电补丁'
+        required: false
+        default: false
+        type: boolean
+      clean_build:
+        description: '强制清理重编译'
+        required: false
+        default: false
+        type: boolean
+  push:
+    paths:
+      - 'kernel-patches/**'
+      - 'kernel-build/**'
+      - '.github/workflows/build-kernel.yml'
+    branches:
+      - main
+      - master
+
+env:
+  CI: 1
+  DEVICE_CODENAME: miro
+  KERNEL_BRANCH: bsp-miro-v-oss
+
+jobs:
+  build:
+    name: 编译内核 + SukiSU-Ultra
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      # ---- 准备 ----
+      - name: Checkout 项目
+        uses: actions/checkout@v4
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential bc bison flex \
+            libncurses-dev libssl-dev libelf-dev \
+            libmpc-dev libgmp-dev texinfo \
+            python3 python3-pip ccache curl \
+            zip unzip p7zip-full \
+            gcc-aarch64-linux-gnu \
+            liblz4-tool zstd liblzma-dev
+
+      - name: 释放构建空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc 2>/dev/null || true
+          sudo apt-get autoremove -y 2>/dev/null || true
+          df -h .
+
+      # ---- 编译器 ----
+      - name: 缓存 NeutronClang
+        id: cache_neutronclang
+        uses: actions/cache@v4
+        with:
+          path: ~/toolchains/neutron-clang
+          key: neutronclang-antman-v3
+
+      - name: 下载 NeutronClang
+        if: steps.cache_neutronclang.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/toolchains/neutron-clang
+          cd ~/toolchains/neutron-clang
+          curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+          chmod +x antman
+          ./antman -S
+          echo "NeutronClang 版本: $(bin/clang --version | head -1)"
+
+      - name: 设置编译器路径
+        run: |
+          echo "PATH=$HOME/toolchains/neutron-clang/bin:$PATH" >> $GITHUB_ENV
+          clang --version | head -1
+
+      # ---- 内核源码 ----
+      - name: 缓存内核源码
+        id: cache_kernelsource
+        uses: actions/cache@v4
+        with:
+          path: kernel-source
+          key: kernelsource-${{ env.KERNEL_BRANCH }}-v6
+
+      - name: 克隆内核源码
+        if: steps.cache_kernelsource.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 \
+            https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git \
+            -b ${{ env.KERNEL_BRANCH }} \
+            kernel-source
+          echo "源码大小: $(du -sh kernel-source | cut -f1)"
+
+      - name: 重置内核源码到干净状态
+        run: |
+          cd kernel-source
+          git reset --hard "origin/${{ env.KERNEL_BRANCH }}" 2>/dev/null || git reset --hard HEAD
+          git clean -fdx
+          echo "=== kernel-source 已重置到干净状态 ==="
+          git status --short
+          git log --oneline -1
+
+      # ---- 修复 MiCode OSS 缺失的 Kconfig ----
+      - name: 修复 MiCode OSS 缺失的 Kconfig 引用
+        run: |
+          cd kernel-source
+          ensure_dir() {
+            local dir="$1"
+            if [ -e "$dir" ] || [ -L "$dir" ]; then
+              if [ ! -d "$dir" ]; then
+                echo "  ⚠ $dir 存在但非目录，删除..."
+                rm -f "$dir"
+              fi
+            fi
+            mkdir -p "$dir" 2>/dev/null || true
+          }
+
+          # mca charger
+          ensure_dir "drivers/power/supply/mca"
+          if ! [ -f "drivers/power/supply/mca/Kconfig" ]; then
+            printf '%s\n' \
+              'config MCA_CHARGER' \
+              '	bool "MCA Charger support (stub)"' \
+              '	default n' \
+              '	help' \
+              '	  Stub for missing MCA charger Kconfig in OSS kernel.' \
+              '' \
+              'config MCA_CHARGER_FG' \
+              '	bool "MCA Fuel Gauge support (stub)"' \
+              '	default n' \
+              > drivers/power/supply/mca/Kconfig
+            echo "✓ 创建 drivers/power/supply/mca/Kconfig"
+          fi
+
+          # Scan all Kconfig source references
+          echo "=== 检查缺失的 Kconfig 引用 ==="
+          MISSING_KCF=0
+          for kpath in $(grep -roh '^source "[^"]*"' $(find . -name "Kconfig" -not -path "./out/*" 2>/dev/null) 2>/dev/null | sed 's/^source "//;s/"$//' | sort -u); do
+            if [ -n "$kpath" ] && ! [ -f "$kpath" ]; then
+              echo "  缺失: $kpath → 创建 stub"
+              ensure_dir "$(dirname "$kpath")"
+              echo "# Stub Kconfig for $kpath" > "$kpath"
+              MISSING_KCF=$((MISSING_KCF+1))
+            fi
+          done
+          echo "修复了 $MISSING_KCF 个缺失的 Kconfig 引用"
+
+      # ---- SukiSU-Ultra ----
+      - name: 集成 SukiSU-Ultra
+        if: ${{ !inputs.skip_sukisu }}
+        run: |
+          cd kernel-source
+          SUKISU_OK=0
+
+          # Check directory structure
+          if [ -d "common/drivers" ]; then
+            DRIVERS_DIR="common/drivers"
+          elif [ -d "drivers" ]; then
+            DRIVERS_DIR="drivers"
+          else
+            echo "❌ 未找到 drivers/ 目录"
+            exit 1
+          fi
+
+          echo "使用 drivers 目录: $DRIVERS_DIR"
+
+          # Check if already integrated
+          if [ -d "KernelSU" ] || [ -L "$DRIVERS_DIR/kernelsu" ]; then
+            echo "⚠ 已有 SukiSU 集成，跳过"
+            SUKISU_OK=1
+          else
+            # Try official setup.sh
+            if curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/${{ inputs.sukisu_branch || 'main' }}/kernel/setup.sh" -o /tmp/sukisu-setup.sh 2>/dev/null; then
+              chmod +x /tmp/sukisu-setup.sh
+              if bash /tmp/sukisu-setup.sh "${{ inputs.sukisu_branch || 'main' }}" 2>/dev/null; then
+                echo "✓ SukiSU-Ultra 集成成功 (官方脚本)"
+                SUKISU_OK=1
+              fi
+            fi
+
+            # Manual fallback
+            if [ $SUKISU_OK -eq 0 ]; then
+              echo "⚠ 官方脚本失败，尝试手动集成..."
+              if git clone --depth 1 -b "${{ inputs.sukisu_branch || 'main' }}" \
+                https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU 2>/dev/null || \
+                 git clone --depth 1 \
+                https://github.com/SukiSU-Ultra/SukiSU-Ultra.git KernelSU 2>/dev/null; then
+                ln -sf "$(realpath KernelSU/kernel)" "$DRIVERS_DIR/kernelsu" 2>/dev/null || true
+                grep -q "kernelsu" "$DRIVERS_DIR/Makefile" 2>/dev/null || \
+                  printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$DRIVERS_DIR/Makefile"
+                grep -q 'source "drivers/kernelsu/Kconfig"' "$DRIVERS_DIR/Kconfig" 2>/dev/null || \
+                  sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' "$DRIVERS_DIR/Kconfig" 2>/dev/null || true
+                echo "✓ SukiSU-Ultra 集成成功 (手动方式)"
+                SUKISU_OK=1
+              fi
+            fi
+          fi
+
+          # Save status for later steps
+          echo "SUKISU_OK=$SUKISU_OK" >> $GITHUB_ENV
+          echo "SukiSU 集成状态: $([ $SUKISU_OK -eq 1 ] && echo '成功' || echo '失败')"
+
+          if [ $SUKISU_OK -eq 1 ]; then
+            ls -la "$DRIVERS_DIR/kernelsu/" 2>/dev/null | head -5 || echo "⚠ symlink 未找到"
+          fi
+
+      - name: 跳过 SukiSU 集成
+        if: ${{ inputs.skip_sukisu }}
+        run: |
+          echo "已跳过 SukiSU-Ultra 集成"
+          echo "SUKISU_OK=0" >> $GITHUB_ENV
+
+      # ---- 省电优化补丁 ----
+      - name: 应用省电优化补丁
+        if: ${{ !inputs.skip_patches }}
+        run: |
+          cd kernel-source
+          PATCHES=(
+            "../kernel-patches/0001-scheduler-unfair-boost.patch"
+            "../kernel-patches/0002-cpu-governor-tuning.patch"
+            "../kernel-patches/0003-power-management.patch"
+          )
+          for patch in "${PATCHES[@]}"; do
+            base=$(basename "$patch")
+            echo "=== 应用: $base ==="
+            case "$base" in
+              0001*) marker="kernel/sched/k80pro_unfair.c" ;;
+              0002*) marker="kernel/sched/k80pro_tune.c" ;;
+              0003*) marker="kernel/power/k80pro_pm.c" ;;
+              *)     marker="" ;;
+            esac
+
+            if git apply --check "$patch" 2>/dev/null; then
+              git apply "$patch"
+              echo "  ✓ 应用成功"
+            elif git apply --check --reverse "$patch" 2>/dev/null; then
+              echo "  ⚠ 已应用过，跳过"
+            elif [ -n "$marker" ] && [ -f "$marker" ]; then
+              echo "  ⚠ 标记文件 $marker 已存在，判定为已应用"
+            else
+              echo "  ✗ 应用失败"
+              git apply --check "$patch" 2>&1 | head -40 || true
+              exit 1
+            fi
+          done
+          echo "=== 所有省电补丁处理完毕 ==="
+          ls -1 kernel/sched/k80pro_*.c kernel/power/k80pro_*.c include/linux/k80pro_*.h 2>/dev/null || true
+
+      - name: 跳过省电优化
+        if: ${{ inputs.skip_patches }}
+        run: echo "已跳过省电优化补丁"
+
+      # ---- defconfig ----
+      - name: 配置内核编译选项
+        run: |
+          cd kernel-source
+          export ARCH=arm64
+          DEFCONFIG=""
+
+          # Strategy 1: vendor defconfig
+          for path in \
+            "arch/arm64/configs/vendor/sun-miro_defconfig" \
+            "arch/arm64/configs/vendor/sun_miro_defconfig" \
+            "arch/arm64/configs/vendor/sun_defconfig" \
+            "arch/arm64/configs/vendor/miro_defconfig" \
+            "arch/arm64/configs/sun-miro_defconfig" \
+            "arch/arm64/configs/sun_defconfig" \
+            "arch/arm64/configs/miro_defconfig"; do
+            if [ -f "$path" ]; then
+              DEFCONFIG="$path"
+              echo "✓ 找到 vendor defconfig: $path"
+              break
+            fi
+          done
+
+          # Strategy 2: GKI + vendor fragments
+          if [ -z "$DEFCONFIG" ]; then
+            echo "尝试 GKI + vendor fragments..."
+            GKI_DC=""
+            for gpath in "arch/arm64/configs/gki_defconfig" "gki_defconfig"; do
+              if [ -f "$gpath" ]; then
+                GKI_DC="$gpath"
+                break
+              fi
+            done
+            if [ -n "$GKI_DC" ]; then
+              make O=out ARCH=arm64 gki_defconfig
+              if [ -f "out/.config" ]; then
+                VENDOR_FRAGS=""
+                for frag_dir in "arch/arm64/configs/vendor" "vendor" "arch/arm64/configs"; do
+                  for frag_pair in \
+                    "sun_perf.config miro_perf.config" \
+                    "sun_consolidate.config miro_consolidate.config"; do
+                    frag1=$(echo "$frag_pair" | cut -d' ' -f1)
+                    frag2=$(echo "$frag_pair" | cut -d' ' -f2)
+                    if [ -f "$frag_dir/$frag1" ] && [ -f "$frag_dir/$frag2" ]; then
+                      VENDOR_FRAGS="$frag_dir/$frag1 $frag_dir/$frag2"
+                      echo "✓ 找到 vendor fragments: $frag1 + $frag2"
+                      break 2
+                    fi
+                  done
+                done
+                if [ -n "$VENDOR_FRAGS" ]; then
+                  for frag in $VENDOR_FRAGS; do
+                    echo "  合并: $frag"
+                    scripts/kconfig/merge_config.sh -m -O out "$frag" 2>/dev/null || cat "$frag" >> out/.config
+                  done
+                fi
+              fi
+            fi
+          else
+            # Use found defconfig
+            make O=out ARCH=arm64 "$(basename "$DEFCONFIG")"
+          fi
+
+          # Strategy 3: fallback search
+          if [ ! -f "out/.config" ]; then
+            echo "搜索含 sun/miro 的 defconfig..."
+            DEFCONFIG=$(find . -maxdepth 5 \( -name "*sun*defconfig*" -o -name "*miro*defconfig*" \) -not -path "./out/*" 2>/dev/null | head -1 || true)
+            if [ -n "$DEFCONFIG" ]; then
+              make O=out ARCH=arm64 "$(basename "$DEFCONFIG")"
+            fi
+          fi
+
+          [ ! -f "out/.config" ] && echo "❌ 未找到可用 defconfig" && exit 1
+
+          echo "内核配置文件: out/.config"
+
+          # Merge defconfig additions
+          ADDITIONS="../kernel-patches/defconfig-additions.conf"
+          SUKISU_OK="${{ env.SUKISU_OK }}"
+          if [ -f "$ADDITIONS" ]; then
+            echo "=== 合并自定义配置 ==="
+            while IFS= read -r line; do
+              [[ -z "$line" ]] && continue
+              re_config='^CONFIG_([A-Za-z0-9_]+)=(.+)$'
+              re_notset='^# CONFIG_([A-Za-z0-9_]+) is not set$'
+
+              if [[ "$line" =~ $re_notset ]]; then
+                name="${BASH_REMATCH[1]}"
+                scripts/config --file out/.config --disable "CONFIG_$name" 2>/dev/null || true
+                continue
+              fi
+              [[ "$line" =~ ^# ]] && continue
+
+              if [[ "$line" =~ $re_config ]]; then
+                name="${BASH_REMATCH[1]}"
+                val="${BASH_REMATCH[2]}"
+
+                # Skip CONFIG_KSU if SukiSU not integrated
+                if [ "$name" = "KSU" ] && [ "$SUKISU_OK" != "1" ]; then
+                  echo "  跳过 CONFIG_KSU (SukiSU 未集成)"
+                  continue
+                fi
+
+                scripts/config --file out/.config --enable "CONFIG_$name" 2>/dev/null || true
+                if [ "$val" != "y" ]; then
+                  val="${val%\"}"
+                  val="${val#\"}"
+                  scripts/config --file out/.config --set-str "CONFIG_$name" "$val" 2>/dev/null || true
+                fi
+              fi
+            done < "$ADDITIONS"
+            echo "✓ 自定义配置已合并"
+          fi
+
+          # Set kernel version
+          scripts/config --file out/.config --set-str CONFIG_LOCALVERSION "-k80pro-optimized" 2>/dev/null || true
+          make O=out ARCH=arm64 olddefconfig 2>&1 | tail -3
+
+          echo "=== defconfig 配置完成 ==="
+          echo "CONFIG_KSU=$(scripts/config --file out/.config --state CONFIG_KSU 2>/dev/null || echo 'unknown')"
+
+      # ---- 编译 ----
+      - name: 清理旧编译
+        if: ${{ inputs.clean_build }}
+        run: |
+          cd kernel-source
+          make O=out ARCH=arm64 mrproper 2>/dev/null || true
+
+      - name: 编译内核
+        run: |
+          cd kernel-source
+          JOBS=$(nproc)
+          echo "编译线程数: $JOBS"
+          echo "开始编译..."
+
+          export CC=clang
+          make O=out ARCH=arm64 LLVM=1 -j"$JOBS" 2>&1 | tee build.log | tail -30
+          ret=${PIPESTATUS[0]}
+
+          if [ $ret -ne 0 ]; then
+            echo "❌ 编译失败！"
+            echo "=== 错误摘要 ==="
+            grep -i "error:" build.log 2>/dev/null | tail -30 || tail -80 build.log
+            exit 1
+          fi
+
+          echo "✓ 内核编译成功！"
+          echo "内核镜像大小: $(du -h out/arch/arm64/boot/Image 2>/dev/null | cut -f1)"
+
+      # ---- 打包 ----
+      - name: AnyKernel3 打包
+        run: |
+          cd kernel-source
+          RELEASE_DIR=${{ github.workspace }}/release
+          mkdir -p "$RELEASE_DIR"
+
+          BUILD_DATE=$(date +%Y%m%d-%H%M)
+          ZIP_NAME="K80Pro-Power-Kernel-${BUILD_DATE}.zip"
+          TMP_DIR=$(mktemp -d)
+
+          echo "=== 创建 AnyKernel3 ZIP ==="
+
+          # Copy AnyKernel3 template
+          cp -r "${{ github.workspace }}/kernel-build/anykernel/"* "$TMP_DIR/" 2>/dev/null || true
+
+          # Copy kernel image
+          if [ -f "out/arch/arm64/boot/Image" ]; then
+            cp "out/arch/arm64/boot/Image" "$TMP_DIR/kernel" 2>/dev/null || true
+          fi
+
+          # Copy dtb
+          if [ -f "out/arch/arm64/boot/dtb.img" ]; then
+            cp "out/arch/arm64/boot/dtb.img" "$TMP_DIR/dtb.img" 2>/dev/null || true
+          fi
+
+          # Create zip
+          cd "$TMP_DIR"
+          zip -r "$RELEASE_DIR/$ZIP_NAME" . -x "*.git*" 2>/dev/null || \
+            7z a -tzip "$RELEASE_DIR/$ZIP_NAME" . 2>/dev/null || {
+            echo "❌ ZIP 打包失败"
+            exit 1
+          }
+
+          rm -rf "$TMP_DIR"
+          echo "✓ ZIP 打包成功: $ZIP_NAME"
+          echo "大小: $(du -h "$RELEASE_DIR/$ZIP_NAME" | cut -f1)"
+
+      # ---- 上传产物 ----
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: K80Pro-Power-Kernel
+          path: release/*.zip
+          retention-days: 30
+
+      - name: 编译摘要
+        run: |
+          echo "=== 构建摘要 ==="
+          echo "设备: Redmi K80 Pro (miro / SM8750)"
+          echo "内核分支: ${{ env.KERNEL_BRANCH }}"
+          echo "SukiSU 分支: ${{ inputs.sukisu_branch || 'main' }}"
+          echo "SukiSU 状态: ${{ env.SUKISU_OK == '1' && '集成成功' || '未集成' }}"
+          echo "省电补丁: ${{ inputs.skip_patches == false && '已应用' || '已跳过' }}"
+          echo "编译器: NeutronClang"
+          echo ""
+          echo "产物文件:"
+          ls -la release/ 2>/dev/null || echo "  (无产物)"
