@@ -16,23 +16,33 @@
 
 #include "sched.h"
 
+/*
+ * sysctl_sched_latency is defined in kernel/sched/fair.c and not
+ * exported via a header on all kernel versions.
+ */
+extern unsigned int sysctl_sched_latency;
+
 unsigned int k80pro_tune_enable = 1;
 
-static void __init k80pro_apply_eevdf_tuning(void)
+static int __init k80pro_apply_eevdf_tuning(void)
 {
 	if (!k80pro_tune_enable)
-		return;
+		return 0;
 
 	pr_info("k80pro_tune: applying SM8750 EEVDF scheduler tuning\n");
 
-	sysctl_sched_latency			= K80PRO_TUNE_LATENCY_NS;
-	sysctl_sched_migration_cost		= K80PRO_TUNE_MIGRATE_COST;
-	sysctl_sched_nr_migrate			= K80PRO_TUNE_NR_MIGRATE;
+	/*
+	 * Only latency is guaranteed writable across builds.
+	 * sysctl_sched_migration_cost / sysctl_sched_nr_migrate are
+	 * const_debug (read-only when CONFIG_SCHED_DEBUG is off) on
+	 * MiCode, so we leave them alone to avoid const violations.
+	 */
+	sysctl_sched_latency = K80PRO_TUNE_LATENCY_NS;
 
-	pr_info("k80pro_tune: latency=%llu migrate_cost=%llu nr_migrate=%d\n",
-		(unsigned long long)sysctl_sched_latency,
-		(unsigned long long)sysctl_sched_migration_cost,
-		sysctl_sched_nr_migrate);
+	pr_info("k80pro_tune: latency=%llu ns\n",
+		(unsigned long long)sysctl_sched_latency);
+
+	return 0;
 }
 
 #ifdef CONFIG_SYSCTL

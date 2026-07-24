@@ -8,7 +8,5 @@
 extern unsigned int k80pro_tune_enable;
 
 #define K80PRO_TUNE_LATENCY_NS		4000000ULL
-#define K80PRO_TUNE_MIGRATE_COST	200000ULL
-#define K80PRO_TUNE_NR_MIGRATE		8
 
 #endif /* _LINUX_K80PRO_TUNE_H */
