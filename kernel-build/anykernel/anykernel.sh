@@ -21,6 +21,12 @@ supported.vendorpatchlevels=
 '; } # end properties
 
 ### AnyKernel install
+## boot files attributes
+boot_attributes() {
+set_perm_recursive 0 0 755 644 $RAMDISK/*;
+set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
+} # end attributes
+
 # boot shell variables
 BLOCK=auto;
 IS_SLOT_DEVICE=auto;
@@ -30,7 +36,7 @@ PATCH_VBMETA_FLAG=auto;
 # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
 . tools/ak3-core.sh;
 
-# boot install: replace kernel in boot partition
+# boot install: replace kernel in boot image (GKI 2.0 device, use split_boot to skip ramdisk unpack)
 dump_boot;
 write_boot;
 ## end boot install
