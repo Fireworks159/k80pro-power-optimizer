@@ -294,65 +294,40 @@ integrate_sukisu() {
     cd "$PROJECT_DIR"
 }
 
-# ---- 应用省电优化补丁 ----
+# ---- 集成 K80 Pro 内核模块 ----
 apply_power_patches() {
-    section "6. 应用不公平调度省电优化补丁"
+    section "6. 集成 K80 Pro  unfair 调度 / EEVDF 调优 / PM 统计模块"
     if [ "${SKIP_PATCHES:-0}" = "1" ]; then
-        warn "已跳过省电补丁 (SKIP_PATCHES=1)"
+        warn "已跳过 K80 Pro 模块集成 (SKIP_PATCHES=1)"
         return
     fi
-    cd "$KERNEL_DIR"
+    cd "$PROJECT_DIR"
 
-    local patches=(
-        "0001-scheduler-unfair-boost.patch"
-        "0002-cpu-governor-tuning.patch"
-        "0003-power-management.patch"
-    )
+    local integrate_script="$SCRIPT_DIR/integrate-modules.py"
+    if [ ! -f "$integrate_script" ]; then
+        error "找不到集成脚本: $integrate_script"
+        exit 1
+    fi
 
-    for patch in "${patches[@]}"; do
-        local patch_path="$PATCHES_DIR/$patch"
-        if [ ! -f "$patch_path" ]; then
-            error "补丁不存在: $patch_path"
+    python3 "$integrate_script" "$KERNEL_DIR"
+    if [ $? -ne 0 ]; then
+        error "K80 Pro 内核模块集成失败"
+        exit 1
+    fi
+
+    info "K80 Pro 内核模块: 集成完成"
+
+    # Validate integration before continuing
+    local validate_script="$SCRIPT_DIR/validate-integration.py"
+    if [ -f "$validate_script" ]; then
+        python3 "$validate_script" "$KERNEL_DIR"
+        if [ $? -ne 0 ]; then
+            error "K80 Pro 内核模块验证失败"
             exit 1
         fi
+        info "K80 Pro 内核模块: 验证通过"
+    fi
 
-        # Determine marker file
-        local marker=""
-        case "$patch" in
-            0001*) marker="kernel/sched/k80pro_unfair.c" ;;
-            0002*) marker="kernel/sched/k80pro_tune.c" ;;
-            0003*) marker="kernel/power/k80pro_pm.c" ;;
-        esac
-
-        # Already applied?
-        if [ -n "$marker" ] && [ -f "$marker" ]; then
-            info "补丁已应用: $patch ($marker 存在)"
-            continue
-        fi
-
-        info "应用补丁: $patch..."
-        if git apply --check "$patch_path" 2>/dev/null; then
-            git apply "$patch_path"
-            info "  ✓ $patch 应用成功"
-        elif git apply --check --reverse "$patch_path" 2>/dev/null; then
-            info "  ⚠ $patch 已应用过 (反向检查通过)，跳过"
-        else
-            error "  ✗ $patch 应用失败！"
-            echo "  --- 错误信息 ---"
-            git apply --check "$patch_path" 2>&1 | head -30 || true
-            echo "  尝试使用 patch 命令强制应用..."
-            if patch -p1 -N --merge < "$patch_path" 2>/dev/null; then
-                info "  ✓ $patch 应用成功 (patch --merge)"
-            else
-                patch -p1 -N < "$patch_path" 2>/dev/null || {
-                    error "  ✗ 强制应用也失败，请手动解决冲突"
-                    exit 1
-                }
-                info "  ✓ $patch 应用成功 (patch 强制)"
-            fi
-        fi
-    done
-    info "省电优化补丁: 全部应用完成"
     cd "$PROJECT_DIR"
 }
 

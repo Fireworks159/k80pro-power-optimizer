@@ -51,7 +51,7 @@ new file mode 100644
 index 000000000000..62ab0e874b9e
 --- /dev/null
 +++ b/include/linux/k80pro_tune.h
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,15 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * K80 Pro Power Optimizer - EEVDF scheduler tuning interface
@@ -82,7 +82,7 @@ new file mode 100644
 index 000000000000..1c6a2a9e7dd4
 --- /dev/null
 +++ b/kernel/sched/k80pro_tune.c
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,64 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * K80 Pro Power Optimizer - EEVDF scheduler tuning

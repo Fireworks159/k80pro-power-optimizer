@@ -25,7 +25,7 @@ on:
         default: false
         type: boolean
       skip_patches:
-        description: '跳过省电补丁'
+        description: '跳过 K80 Pro 内核模块'
         required: false
         default: false
         type: boolean
@@ -235,45 +235,24 @@ jobs:
           echo "已跳过 SukiSU-Ultra 集成"
           echo "SUKISU_OK=0" >> $GITHUB_ENV
 
-      # ---- 省电优化补丁 ----
-      - name: 应用省电优化补丁
+      # ---- K80 Pro 内核模块集成 ----
+      - name: 集成 K80 Pro 内核模块
         if: ${{ !inputs.skip_patches }}
         run: |
-          cd kernel-source
-          PATCHES=(
-            "../kernel-patches/0001-scheduler-unfair-boost.patch"
-            "../kernel-patches/0002-cpu-governor-tuning.patch"
-            "../kernel-patches/0003-power-management.patch"
-          )
-          for patch in "${PATCHES[@]}"; do
-            base=$(basename "$patch")
-            echo "=== 应用: $base ==="
-            case "$base" in
-              0001*) marker="kernel/sched/k80pro_unfair.c" ;;
-              0002*) marker="kernel/sched/k80pro_tune.c" ;;
-              0003*) marker="kernel/power/k80pro_pm.c" ;;
-              *)     marker="" ;;
-            esac
+          python3 kernel-build/integrate-modules.py kernel-source
+          echo "=== 集成后的新文件 ==="
+          ls -1 kernel-source/kernel/sched/k80pro_*.c \
+                 kernel-source/kernel/power/k80pro_*.c \
+                 kernel-source/include/linux/k80pro_*.h 2>/dev/null || true
 
-            if git apply --check "$patch" 2>/dev/null; then
-              git apply "$patch"
-              echo "  ✓ 应用成功"
-            elif git apply --check --reverse "$patch" 2>/dev/null; then
-              echo "  ⚠ 已应用过，跳过"
-            elif [ -n "$marker" ] && [ -f "$marker" ]; then
-              echo "  ⚠ 标记文件 $marker 已存在，判定为已应用"
-            else
-              echo "  ✗ 应用失败"
-              git apply --check "$patch" 2>&1 | head -40 || true
-              exit 1
-            fi
-          done
-          echo "=== 所有省电补丁处理完毕 ==="
-          ls -1 kernel/sched/k80pro_*.c kernel/power/k80pro_*.c include/linux/k80pro_*.h 2>/dev/null || true
+      - name: 验证 K80 Pro 模块集成
+        if: ${{ !inputs.skip_patches }}
+        run: |
+          python3 kernel-build/validate-integration.py kernel-source
 
       - name: 跳过省电优化
         if: ${{ inputs.skip_patches }}
-        run: echo "已跳过省电优化补丁"
+        run: echo "已跳过 K80 Pro 内核模块集成"
 
       # ---- defconfig ----
       - name: 配置内核编译选项
@@ -477,7 +456,7 @@ jobs:
           echo "内核分支: ${{ env.KERNEL_BRANCH }}"
           echo "SukiSU 分支: ${{ inputs.sukisu_branch || 'main' }}"
           echo "SukiSU 状态: ${{ env.SUKISU_OK == '1' && '集成成功' || '未集成' }}"
-          echo "省电补丁: ${{ inputs.skip_patches == false && '已应用' || '已跳过' }}"
+          echo "K80 Pro 模块: ${{ inputs.skip_patches == false && '已集成' || '已跳过' }}"
           echo "编译器: NeutronClang"
           echo ""
           echo "产物文件:"
