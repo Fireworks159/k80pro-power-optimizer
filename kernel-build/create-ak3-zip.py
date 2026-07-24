@@ -42,7 +42,7 @@ def create_zip(src_dir: str, output_zip: str, kernel_image: str | None = None):
 
         # Add kernel image if provided
         if kernel_image and os.path.isfile(kernel_image):
-            info = zipfile.ZipInfo('kernel')
+            info = zipfile.ZipInfo('Image')
             info.external_attr = (0o644 & 0oFFFF) << 16
             with open(kernel_image, 'rb') as src:
                 zf.writestr(info, src.read())

@@ -556,9 +556,10 @@ package_kernel() {
     chmod +x "$tmp_dir/META-INF/com/google/android/update-binary" 2>/dev/null || true
     chmod +x "$tmp_dir/tools/"* 2>/dev/null || true
 
-    # Copy kernel image
+    # Copy kernel image (must be named "Image" for flash_boot to find it)
     if [ -f "$OUT_DIR/arch/arm64/boot/Image" ]; then
-        cp "$OUT_DIR/arch/arm64/boot/Image" "$tmp_dir/kernel" 2>/dev/null || true
+        cp "$OUT_DIR/arch/arm64/boot/Image" "$tmp_dir/Image" 2>/dev/null || true
+        info "内核镜像已复制: $tmp_dir/Image"
     fi
 
     # Copy dtb if available

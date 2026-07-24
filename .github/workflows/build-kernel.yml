@@ -451,9 +451,10 @@ jobs:
           chmod +x "$TMP_DIR/META-INF/com/google/android/update-binary" 2>/dev/null || true
           chmod +x "$TMP_DIR/tools/"* 2>/dev/null || true
 
-          # Copy kernel image
+          # Copy kernel image (must be named "Image" for flash_boot to find it)
           if [ -f "out/arch/arm64/boot/Image" ]; then
-            cp "out/arch/arm64/boot/Image" "$TMP_DIR/kernel" 2>/dev/null || true
+            cp "out/arch/arm64/boot/Image" "$TMP_DIR/Image" 2>/dev/null || true
+            echo "✓ 内核镜像已复制: $TMP_DIR/Image"
           fi
 
           # Copy dtb
